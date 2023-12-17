@@ -15,7 +15,8 @@ if uploaded_file is not None:
     image_array = np.array(image)
 
     # Обработка изображения
-    length, width, contour_area,assymetry = utils.get_top_bottom_left_right(image_array)
+    length, width, contour_area,assymetry = utils.measure_extract(image_array)
+    class_leaf = utils.classfier_leaf(image_array)
     # Отображение обработанного изображения
     st.image(image, caption="Изображение")
 
@@ -24,3 +25,4 @@ if uploaded_file is not None:
     st.write("Ширина: ", round(width,3))
     st.write("Площадь: ", round(contour_area,3))
     st.write("флуктуирующая асимметрия листа: ", round(assymetry, 3))
+    st.write("Класс листа : ", class_leaf)
