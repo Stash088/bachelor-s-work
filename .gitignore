@@ -1,10 +1,5 @@
 /.idea
-/123.png
-/456.png
 /__pycache__
-/leaf.png
-/main.py
-/test.jpg
-/midle_leaf.jpeg
 /venv
 /data
+test.py
