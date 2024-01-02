@@ -71,12 +71,6 @@ def get_initial_seed(img, side):
 
 
 def region_grow(img, side, th=1):
-    """
-    function: 区域增长法
-    description: 生长结果区域标记为白色(255), 背景色为黑色(0)
-    parameters: img: 源图像, side: 增长大方向, pt: 起始种子点, th: 生长的阈值.
-    """
-
     # get initial seed
     initial_seed, direction = get_initial_seed(img, side)
     growing_pt = [0, 0]  # 试探生长点
@@ -118,7 +112,7 @@ def get_boundary(image):
     if len(img.shape) == 3:
         img = color.rgb2gray(img)
 
-    contours = measure.find_contours(img, 0.68, fully_connected='high')
+    contours = measure.find_contours(img, 0.67, fully_connected='high')
     contours = [contours[i] for i in range(len(contours)) if len(contours[i]) > 100]
     contours_lst = []
     for i in range(len(contours)):
@@ -127,6 +121,155 @@ def get_boundary(image):
     contours_lst = np.array(contours_lst)
 
     return contours_lst
+
+
+def extract_vein_by_region_grow(edges_canny, image, threshold_perimeter, threshold_kernel_boundary):
+    """
+    edges_canny, image, threshold_perimeter, threshold_kernel_boundary -> vein, main_vein, vein_points, main_vein_points
+    :param edges_canny: edges_canny.
+    :param image: path_name of leave.
+    :param threshold_perimeter: tolerated threshold of perimeter of contours, to get rid of the fractions of boundary.
+    :param threshold_kernel_boundary: width of dilated boundary, to get rid of the boundary.
+    :return: vein, main_vein, vein_points, main_vein_points.
+    """
+    # cut out boundary
+    boundary = get_boundary(image)
+    canvas_boundary = np.zeros(edges_canny.shape[:2], dtype=np.uint8)
+    for i in boundary:
+        canvas_boundary[int(i[0]), int(i[1])] = 255
+    kernel_boundary = cv2.getStructuringElement(cv2.MORPH_RECT, threshold_kernel_boundary)
+    canvas_boundary = cv2.dilate(canvas_boundary, kernel_boundary)  # 膨胀后的边框
+    opened = cv2.bitwise_or(edges_canny, canvas_boundary)
+    res_all = region_grow(opened, 'all')
+    vein = cv2.subtract(res_all, canvas_boundary)
+
+    h, w = vein.shape
+
+    vein[:, round(w / 2) - 20:round(w / 2) + 20], contours = cv2.findContours(vein[:, round(w/2)-20:round(w/2)+20], cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    small_perimeters = [i for i in contours if len(i) < 10]   # 删短周长的区域
+    cv2.fillPoly(vein[:, round(w/2)-20:round(w/2)+20], small_perimeters, 0)
+
+    vein_end = [0, 0]
+    start_point_prev = [-1, -1]
+    for end_idx in range(len(vein[::-1, round(w/2)-20:round(w/2)+20])):
+        if vein[end_idx, :].any():
+            for j in range(len(vein[end_idx, round(w/2)-20:round(w/2)+20])):
+                if vein[:, round(w/2)-20:round(w/2)+20][end_idx][j] == 255:
+                    vein_end = [end_idx, j+1]
+    for i in range(len(vein[:vein_end[0], round(w/2)-20:round(w/2)+20])):
+        if i != 0:
+            if start_point and end_point and i in list(range(0, end_point[0])):
+                continue
+        start_point = []
+        end_point = []
+        flag_end = 'go'
+        flag_continue_for_i = 'go'
+
+        for j in range(len(vein[0:vein_end[0], round(w/2)-20:round(w/2)+20])):
+            if flag_end == 'brk':
+                break
+            if vein[:, round(w/2)-20:round(w/2)+20][j].any() and start_point == []:
+                if not vein[:, round(w/2)-20:round(w/2)+20][j+1].any():
+                    for k in range(len(vein[:, round(w/2)-20:round(w/2)+20][j])):
+                        if vein[:, round(w/2)-20:round(w/2)+20][j][k] == 255:
+                            start_point = [j, (k+round(w/2)-20)+1]
+                            if start_point[0] == start_point_prev[0]:
+                                flag_continue_for_i = 'cnt'
+                            start_point_prev = start_point.copy()
+                            break
+            if flag_continue_for_i == 'cnt':
+                break
+            if not vein[:, round(w/2)-20:round(w/2)+20][j].any() and start_point != [] and end_point == []:
+                if vein[:, round(w/2)-20:round(w/2)+20][j+1].any():
+                    for k in range(len(vein[:, round(w/2)-20:round(w/2)+20][j])):
+                        if vein[:, round(w/2)-20:round(w/2)+20][j+1][k] == 255:
+                            end_point = [j+1, (k+round(w/2)-20)+1]
+                            flag_end = 'brk'
+                            break
+            else:
+                continue
+        # get points end
+        if not start_point or not end_point or flag_continue_for_i == 'cnt':
+            continue
+
+        canny_threshold_enhanced_locally = [30, 60]
+
+        vein_enhanced_locally = image[start_point[0]:end_point[0],
+                                     min(start_point[1], end_point[1]):max(start_point[1], end_point[1])+1]
+
+        edge_enhanced_locally = cv2.Canny(vein_enhanced_locally, *canny_threshold_enhanced_locally, apertureSize=3)
+
+        white_pixel_percentage = list(edge_enhanced_locally.ravel() == 255).count(1) /\
+                                 len(list(edge_enhanced_locally.ravel()))
+        start_point_check = [-1, -1]
+        counter_canny_adjustment = 0
+        counter_prevent_dead_loop = 2
+        white_pixel_percentage_prev = 0
+
+        while not 1/40 < white_pixel_percentage < 1/20 and (start_point_check == [-1, -1] or
+                                                                    start_point_check[1] >= start_point[0]):
+            if not counter_prevent_dead_loop:
+
+                break
+
+            if white_pixel_percentage <= 1/40:
+                canny_threshold_enhanced_locally = [canny_threshold_enhanced_locally[0] - 1,
+                                                    canny_threshold_enhanced_locally[1] - 1]
+            else:
+                canny_threshold_enhanced_locally = [canny_threshold_enhanced_locally[0] + 1,
+                                                    canny_threshold_enhanced_locally[1] + 1]
+
+            edge_enhanced_locally = cv2.Canny(vein_enhanced_locally, *canny_threshold_enhanced_locally, apertureSize=3)
+
+            white_pixel_percentage = (np.sum(edge_enhanced_locally==1) /
+                                         len(list(edge_enhanced_locally.ravel())))
+            if white_pixel_percentage == white_pixel_percentage_prev:
+                counter_prevent_dead_loop -= 1
+            white_pixel_percentage_prev = white_pixel_percentage
+
+            counter_canny_adjustment += 1
+
+            for k in range(len(vein[:, round(w / 2) - 20:round(w / 2) + 20])):
+                if vein[:, round(w / 2) - 20:round(w / 2) + 20][k].any():
+                    if not vein[:, round(w / 2) - 20:round(w / 2) + 20][min(vein.shape[0]-1, k + 1)].any():
+                        for j in range(len(vein[:, round(w / 2) - 20:round(w / 2) + 20][k])):
+                            if vein[:, round(w / 2) - 20:round(w / 2) + 20][k][j] == 255:
+                                start_point_check = [k, j + 1]
+                                break
+
+        vein[start_point[0]:end_point[0], min(start_point[1], end_point[1]):max(start_point[1], end_point[1])+1] = \
+            edge_enhanced_locally
+
+    vein[:, round(w / 2) - 20:round(w / 2) + 20], contours= \
+        cv2.findContours(vein[:, round(w/2)-20:round(w/2)+20], cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    small_perimeters = [i for i in contours if len(i) < 10]   # 删短周长的区域
+    cv2.fillPoly(vein[:, round(w/2)-20:round(w/2)+20], small_perimeters, 0)
+
+    vein, contours = cv2.findContours(vein, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    small_perimeters = [i for i in contours if len(i) < threshold_perimeter]   # 删短周长的区域
+    cv2.fillPoly(vein, small_perimeters, 0)
+
+    res_top = region_grow(vein, 'top')
+    kernel_main_vein = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    res_top = cv2.dilate(res_top, kernel_main_vein)
+    res_top = cv2.dilate(res_top, kernel_main_vein)
+    main_vein = cv2.bitwise_and(vein, res_top)
+
+    # save points
+    vein_points = []
+    for i in range(vein.shape[0]):
+        for j in range(vein.shape[1]):
+            if vein[i, j] == 255:
+                vein_points.append([i, j])
+    main_vein_points = []
+    for i in range(main_vein.shape[0]):
+        for j in range(main_vein.shape[1]):
+            if main_vein[i, j] == 255:
+                main_vein_points.append([i, j])
+    main_vein_points = np.array(main_vein_points)
+
+
+    return vein, main_vein, vein_points, main_vein_points
 
 def mask_leaf(image):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -213,6 +356,7 @@ def measure_extract(image):
 
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
     largest_contour = contours[0]
+
     x, y, w, h = cv2.boundingRect(largest_contour)
     top = (x + w // 2, y)
     bottom = (x + w // 2, y + h - 1)
@@ -241,8 +385,9 @@ def measure_extract(image):
     scaled_area = contour_area / (conversion_factor ** 2)
 
 
-    center_x = int(np.mean(largest_contour[:, :, 0]))
-    center_y = int(np.mean(largest_contour[:, :, 1]))
+    M = cv2.moments(largest_contour)
+    center_x = int(M['m10'] / M['m00'])
+    center_y = int(M['m01'] / M['m00'])
 
     distances_x = []
     distances_y = []
@@ -259,49 +404,26 @@ def measure_extract(image):
     mean_abs_diff_y = np.mean(abs_diff_y)
 
     fluctuating_asymmetry = (mean_abs_diff_x / mean_abs_diff_y) if mean_abs_diff_y != 0 else 1
-
-    cv2.drawContours(image, [largest_contour], -1, (255, 0, 0), thickness=3)
-    cv2.circle(image, top, 9, (0, 0, 255), -1)
-    cv2.circle(image, bottom, 9, (0, 0, 255), -1)
-    cv2.circle(image, leftmost, 9, (0, 255, 0), -1)
-    cv2.circle(image, rightmost, 9, (0, 255, 0), -1)
-
-    # cv2.imshow("Result", image)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
     return scaled_length,scaled_width ,scaled_area , fluctuating_asymmetry
 
-
-
-def local_enhancement(image_path):
-
-    img = cv2.imread(image_path,0)
-    clahe = cv2.createCLAHE(clipLimit=2, tileGridSize=(10, 10))
-    img_equalized = clahe.apply(img)
-
-    h, w = img.shape
-    img_GB = cv2.bilateralFilter(img, 3, 50, 50)
+def canny_edges(image):
+    clahe = cv2.createCLAHE(clipLimit=3, tileGridSize=(10, 10))
+    img_gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(img_gray, (5, 5), 0)
+    img_equalized = clahe.apply(blurred)
+    h, w = img_equalized.shape
+    img_GB = cv2.bilateralFilter(image, 3, 50, 50)
     canny_threshold_common = [40, 100]
     canny_threshold_enhanced = [30, 60]
     edge_canny_up = cv2.Canny(img_GB[:round(h/6), round(w/2)-20:round(w/2)+20], *canny_threshold_common, apertureSize=3)
     edge_canny_middle = cv2.Canny(img_GB[round(h/6):round(h/2), round(w/2)-20:round(w/2)+20],
                                   *canny_threshold_enhanced, apertureSize=3)
-    t = list(edge_canny_middle.ravel() == 255).count(1)/len(list(edge_canny_middle.ravel()))
 
-    while not 1/40 < t < 1/20:
-        if t <= 1/40:
-            canny_threshold_enhanced = [canny_threshold_enhanced[0] - 1, canny_threshold_enhanced[1] - 1]
-        else:
-            canny_threshold_enhanced = [canny_threshold_enhanced[0] + 1, canny_threshold_enhanced[1] + 1]
-        edge_canny_middle = cv2.Canny(img_GB[round(h / 6):round(h / 2), round(w / 2) - 20:round(w / 2) + 20],
-                                      *canny_threshold_enhanced, apertureSize=3)
-        t = list(edge_canny_middle.ravel() == 255).count(1) / len(list(edge_canny_middle.ravel()))
     edge_canny_down = cv2.Canny(img_GB[round(h/2):, round(w/2)-20:round(w/2)+20], *canny_threshold_common, apertureSize=3)
     edge_canny_middle_horizontally = np.vstack((edge_canny_up, edge_canny_middle, edge_canny_down))
     edge_canny_left = cv2.Canny(img_GB[:, :round(w/2)-20], *canny_threshold_common, apertureSize=3)
     edge_canny_right = cv2.Canny(img_GB[:, round(w/2)+20:], *canny_threshold_common, apertureSize=3)
     edge_canny = np.hstack((edge_canny_left, edge_canny_middle_horizontally, edge_canny_right))
-
     edge_equalized = cv2.Canny(img_equalized, *canny_threshold_common, apertureSize=3)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 4))
@@ -323,177 +445,34 @@ def local_enhancement(image_path):
     edge_equalized = cv2.morphologyEx(edge_equalized, cv2.MORPH_CLOSE, kernel)
     kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     edge_equalized = cv2.morphologyEx(edge_equalized, cv2.MORPH_CLOSE, kernel2)
-    # cv2.imshow("Result", edge_canny)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
+    _, binary = cv2.threshold(edge_equalized, 0, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C + cv2.THRESH_OTSU)
 
-    return img, img_equalized, edge_canny, edge_equalized
+    cv2.imshow('Binary Image', binary)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    return edge_equalized
 
+def fractal_dimension(image):
+    mask = mask_leaf(image)
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-def extract_vein_by_region_grow(edges_canny, image, threshold_perimeter, threshold_kernel_boundary):
-    """
-    edges_canny, image, threshold_perimeter, threshold_kernel_boundary -> vein, main_vein, vein_points, main_vein_points
-    :param edges_canny: edges_canny.
-    :param image: path_name of leave.
-    :param threshold_perimeter: tolerated threshold of perimeter of contours, to get rid of the fractions of boundary.
-    :param threshold_kernel_boundary: width of dilated boundary, to get rid of the boundary.
-    :return: vein, main_vein, vein_points, main_vein_points.
-    """
-    img_ori_gray = cv2.imread(image, 0)
-    # cut out boundary
-    boundary = get_boundary(image)
-    canvas_boundary = np.zeros(edges_canny.shape[:2], dtype=np.uint8)
-    for i in boundary:
-        canvas_boundary[int(i[0]), int(i[1])] = 255
-    kernel_boundary = cv2.getStructuringElement(cv2.MORPH_RECT, threshold_kernel_boundary)
-    canvas_boundary = cv2.dilate(canvas_boundary, kernel_boundary)  # 膨胀后的边框
-    opened = cv2.bitwise_or(edges_canny, canvas_boundary)
-    res_all = region_grow(opened, 'all')
+    # Вычисляем фрактальную размерность с помощью бокс-счета
+    box_count = 0
+    box_size = 2
 
-    vein = cv2.subtract(res_all, canvas_boundary)
+    while box_size < image.shape[0]:
+        for contour in contours:
+            for point in contour:
+                if point[0][0] % box_size == 0 and point[0][1] % box_size == 0:
+                    box_count += 1
+                    break
 
-    h, w = vein.shape
+        box_size *= 2
 
-    vein[:, round(w / 2) - 20:round(w / 2) + 20], contours, hierarchy = cv2.findContours(vein[:, round(w/2)-20:round(w/2)+20], cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    small_perimeters = [i for i in contours if len(i) < 10]   # 删短周长的区域
-    cv2.fillPoly(vein[:, round(w/2)-20:round(w/2)+20], small_perimeters, 0)
-
-    vein_end = [0, 0]
-    start_point_prev = [-1, -1]
-    # get the bottom index
-    for end_idx in range(len(vein[::-1, round(w/2)-20:round(w/2)+20])):
-        if vein[end_idx, :].any():
-            for j in range(len(vein[end_idx, round(w/2)-20:round(w/2)+20])):
-                if vein[:, round(w/2)-20:round(w/2)+20][end_idx][j] == 255:
-                    vein_end = [end_idx, j+1]
-    for i in range(len(vein[:vein_end[0], round(w/2)-20:round(w/2)+20])):
-        if i != 0:
-            if start_point and end_point and i in list(range(0, end_point[0])):
-                continue
-        # print('i:{}'.format(i))
-        start_point = []
-        end_point = []
-        flag_end = 'go'
-        flag_continue_for_i = 'go'
-
-        # get start_point and end_point
-        for j in range(len(vein[0:vein_end[0], round(w/2)-20:round(w/2)+20])):
-            if flag_end == 'brk':
-                break
-            if vein[:, round(w/2)-20:round(w/2)+20][j].any() and start_point == []:
-                if not vein[:, round(w/2)-20:round(w/2)+20][j+1].any():
-                    for k in range(len(vein[:, round(w/2)-20:round(w/2)+20][j])):
-                        if vein[:, round(w/2)-20:round(w/2)+20][j][k] == 255:
-                            start_point = [j, (k+round(w/2)-20)+1]
-
-                            # print('start_point:', start_point)
-                            if start_point[0] == start_point_prev[0]:
-                                flag_continue_for_i = 'cnt'
-                            start_point_prev = start_point.copy()
-                            break
-            if flag_continue_for_i == 'cnt':
-                break
-            if not vein[:, round(w/2)-20:round(w/2)+20][j].any() and start_point != [] and end_point == []:
-                # print("All zeros in %d-th line." % j)
-                if vein[:, round(w/2)-20:round(w/2)+20][j+1].any():
-                    for k in range(len(vein[:, round(w/2)-20:round(w/2)+20][j])):
-                        if vein[:, round(w/2)-20:round(w/2)+20][j+1][k] == 255:
-                            end_point = [j+1, (k+round(w/2)-20)+1]
-                            # print('end_point:', end_point)
-                            flag_end = 'brk'
-                            break
-            else:
-                continue
-        # get points end
-        if not start_point or not end_point or flag_continue_for_i == 'cnt':
-            continue
-
-        canny_threshold_enhanced_locally = [30, 60]
-
-        vein_enhanced_locally = img_ori_gray[start_point[0]:end_point[0],
-                                     min(start_point[1], end_point[1]):max(start_point[1], end_point[1])+1]
-
-        edge_enhanced_locally = cv2.Canny(vein_enhanced_locally, *canny_threshold_enhanced_locally, apertureSize=3)
-
-        white_pixel_percentage = list(edge_enhanced_locally.ravel() == 255).count(1) /\
-                                 len(list(edge_enhanced_locally.ravel()))
-        start_point_check = [-1, -1]
-        counter_canny_adjustment = 0
-        counter_prevent_dead_loop = 2
-        white_pixel_percentage_prev = 0
-
-        while not 1/40 < white_pixel_percentage < 1/20 and (start_point_check == [-1, -1] or
-                                                                    start_point_check[1] >= start_point[0]):
-            if not counter_prevent_dead_loop:
-
-                break
-
-            if white_pixel_percentage <= 1/40:
-                canny_threshold_enhanced_locally = [canny_threshold_enhanced_locally[0] - 1,
-                                                    canny_threshold_enhanced_locally[1] - 1]
-            else:
-                canny_threshold_enhanced_locally = [canny_threshold_enhanced_locally[0] + 1,
-                                                    canny_threshold_enhanced_locally[1] + 1]
-
-            edge_enhanced_locally = cv2.Canny(vein_enhanced_locally, *canny_threshold_enhanced_locally, apertureSize=3)
-
-            white_pixel_percentage = (np.sum(edge_enhanced_locally==1) /
-                                         len(list(edge_enhanced_locally.ravel())))
-            if white_pixel_percentage == white_pixel_percentage_prev:
-                counter_prevent_dead_loop -= 1
-            white_pixel_percentage_prev = white_pixel_percentage
-
-            counter_canny_adjustment += 1
-
-            for k in range(len(vein[:, round(w / 2) - 20:round(w / 2) + 20])):
-                if vein[:, round(w / 2) - 20:round(w / 2) + 20][k].any():
-                    if not vein[:, round(w / 2) - 20:round(w / 2) + 20][min(vein.shape[0]-1, k + 1)].any():
-                        for j in range(len(vein[:, round(w / 2) - 20:round(w / 2) + 20][k])):
-                            if vein[:, round(w / 2) - 20:round(w / 2) + 20][k][j] == 255:
-                                start_point_check = [k, j + 1]
-                                break
-
-        vein[start_point[0]:end_point[0], min(start_point[1], end_point[1]):max(start_point[1], end_point[1])+1] = \
-            edge_enhanced_locally
-
-    vein[:, round(w / 2) - 20:round(w / 2) + 20], contours, hierarchy = \
-        cv2.findContours(vein[:, round(w/2)-20:round(w/2)+20], cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    small_perimeters = [i for i in contours if len(i) < 10]   # 删短周长的区域
-    cv2.fillPoly(vein[:, round(w/2)-20:round(w/2)+20], small_perimeters, 0)
-
-    vein, contours, hierarchy = cv2.findContours(vein, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    small_perimeters = [i for i in contours if len(i) < threshold_perimeter]   # 删短周长的区域
-    cv2.fillPoly(vein, small_perimeters, 0)
-
-    res_top = region_grow.region_grow(vein, 'top')
-    kernel_main_vein = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    res_top = cv2.dilate(res_top, kernel_main_vein)
-    res_top = cv2.dilate(res_top, kernel_main_vein)
-    main_vein = cv2.bitwise_and(vein, res_top)
-
-    # save points
-    vein_points = []
-    for i in range(vein.shape[0]):
-        for j in range(vein.shape[1]):
-            if vein[i, j] == 255:
-                vein_points.append([i, j])
-    main_vein_points = []
-    for i in range(main_vein.shape[0]):
-        for j in range(main_vein.shape[1]):
-            if main_vein[i, j] == 255:
-                main_vein_points.append([i, j])
-    main_vein_points = np.array(main_vein_points)
-
-    return vein, main_vein, vein_points, main_vein_points
+    # Вычисляем фрактальную размерность
+    fractal_dimension = np.log(box_count) / np.log(box_size)
+    # print(f'Фрактальная размерность: {fractal_dimension}')
+    return fractal_dimension
 
 
-
-# img, img_equalized, edge_canny, edge_equalized = local_enhancement('123.png')
-
-
-
-
-# vein, main_vein, vein_points, main_vein_points = extract_vein_by_region_grow(edge_equalized, img, 150, (15, 15))
-
-img = cv2.imread('leaf.png')
-scaled_length,scaled_width,scaled_area , fluctuating_asymmetry = measure_extract(img)
+image = cv2.imread('data/leaf.png')
